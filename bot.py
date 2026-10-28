@@ -17,6 +17,7 @@ import io
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import img2pdf
 from telegram import (
@@ -167,6 +168,7 @@ MSG_ABOUT_THIS_BOT_COMPRESSES_VIDEOS = (
     "🧠 Looks at your video's resolution, frame rate, codec and bitrate and recommends the best settings.\n"
     "🔊 Edits audio: volume boost, noise reduction, voice enhancement, or replace a video's audio.\n"
     "🎧 Compresses audio files too.\n"
+    "🏷 Renames audio and sets artist / album / cover — with or without compression.\n"
     "📄 Turns a video into a PDF of its frames.\n"
     "\n"
     "🔒 Your files are deleted as soon as they're processed{idle}.\n"
@@ -251,10 +253,11 @@ MSG_AUDIO_DETAILS_ALL_OPTIONAL_NAME = (
     "✏️ Audio details (all optional)\n"
     "\n"
     "📝 Name: {out_name}\n"
+    "🎤 Artist: {artist}\n"
     "💿 Album: {album}\n"
     "🖼 Cover: {cover_path_choice}\n"
     "\n"
-    "Tap a button, then send the new value. When you're done, pick the quality in the menu above."
+    "Tap a button, then send the new value. When you're done, pick the quality in the menu above — or tap \"Send as is\" to keep the sound untouched."
 )
 
 # ---- access request text ----
@@ -339,7 +342,7 @@ MSG_ESTIMATES_ARE_BASED_ON_THE = "Estimates are based on the {sample_label} samp
 MSG_PICK_A_LEVEL_TO_COMPRESS = "Pick a level to compress:"
 MSG_ENCODING_A_SAMPLE_AT_EACH = (
     "🔎 Encoding a {sample_label} sample at each compression level (0/{count_level_order} done)...\n"
-    "This can take a minute or two on a small CPU."
+    "This can take a minute or two 🦦"
 )
 MSG_ANALYZE_AND_SHOW_LEVEL_MENU = "{label} — ~{size_estimates_level} · {detail}"
 
@@ -388,6 +391,15 @@ MSG_JUST_EDITING_THE_AUDIO_THE = (
 )
 MSG_SEND_THE_NEW_FILE_NAME = "📝 Send the new file name now (just the name, no extension)."
 MSG_SEND_THE_ALBUM_NAME_NOW = "💿 Send the album name now. (Send - to remove it.)"
+MSG_SEND_THE_ARTIST_NAME_NOW = "🎤 Send the artist name now. (Send - to remove it.)"
+MSG_UPLOADING_AUDIO_AS_IS = "📤 Uploading your audio..."
+MSG_SENDING_AUDIO_AS_IS = "📤 Applying your changes — the sound itself is not re-encoded..."
+MSG_AUDIO_SENT_AS_IS = "✅ Sent without compression — the sound is exactly as it was."
+MSG_ARTIST = (
+    "🎤 Artist: {custom_artist}\n"
+)
+MSG_COVER_NOT_EMBEDDED = "ℹ️ This format can't hold an embedded cover, so it's only shown as the preview image."
+MSG_SENT_AS_FILE_NOT_MP3_M4A = "ℹ️ Telegram only plays MP3 / M4A as music, so this one was sent as a file (still untouched)."
 MSG_SEND_THE_ALBUM_COVER_NOW = "🖼 Send the album cover now — a photo or an image file."
 MSG_OPTIONAL_AUDIO_ENHANCEMENTS_TOGGLE_T = (
     "{header}\n"
@@ -456,7 +468,7 @@ MSG_SOMETHING_WENT_WRONG_REMOVING_SIMILA = (
 MSG_SAVED_NOW_PICK_THE_QUALITY = (
     "\n"
     "\n"
-    "✅ Saved — now pick the quality in the menu above."
+    "✅ Saved — now pick the quality in the menu above, or tap Send as is."
 )
 MSG_COULDN_T_GENERATE_THE_PREVIEW = "⚠️ Couldn't generate the preview for {label}."
 MSG_COULDN_T_GENERATE_A_PREVIEW = "⚠️ Couldn't generate a preview for {label}."
@@ -705,6 +717,8 @@ BTN_RENAME_ALBUM_NAME_COVER = "✏️ Rename / album name / cover"
 # ---- audio meta keyboard ----
 BTN_RENAME_FILE = "📝 Rename file"
 BTN_ALBUM_NAME = "💿 Album name"
+BTN_ARTIST_NAME = "🎤 Artist name"
+BTN_SEND_AS_IS = "📤 Send as is (no compression)"
 BTN_ALBUM_COVER = "🖼 Album cover"
 BTN_CLEAR_ALL = "🗑 Clear all"
 BTN_DONE = "✅ Done"
@@ -1058,6 +1072,7 @@ def build_database_zip() -> bytes:
         archive.writestr(STATS_ENTRY_NAME, stats_json_bytes())
         archive.writestr(QUOTA_ENTRY_NAME, quota_json_bytes())
         archive.writestr(SUBS_ENTRY_NAME, subscriptions_json_bytes())
+        archive.writestr(REFERRALS_ENTRY_NAME, referrals_json_bytes())
 
     return buffer.getvalue()
 
@@ -1066,7 +1081,7 @@ def database_fingerprint() -> str:
     """Changes only when the saved data changes (zip bytes carry timestamps, so hash the data)."""
     return hashlib.sha256(
         approved_users_json_bytes() + b"|" + stats_json_bytes() + b"|" + quota_json_bytes()
-        + b"|" + subscriptions_json_bytes()
+        + b"|" + subscriptions_json_bytes() + b"|" + referrals_json_bytes()
     ).hexdigest()
 
 
@@ -1108,6 +1123,12 @@ def read_database_bytes(raw: bytes) -> int:
                     merge_subscriptions_bytes(archive.read(SUBS_ENTRY_NAME))
                 except ValueError:
                     logger.warning("Database.zip has an unreadable %s — skipping the subscriptions.", SUBS_ENTRY_NAME)
+
+            if REFERRALS_ENTRY_NAME in archive.namelist():
+                try:
+                    merge_referrals_bytes(archive.read(REFERRALS_ENTRY_NAME))
+                except ValueError:
+                    logger.warning("Database.zip has an unreadable %s — skipping the invites.", REFERRALS_ENTRY_NAME)
 
             return added
     except zipfile.BadZipFile as error:
@@ -1931,6 +1952,7 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # Saved inside Database.zip (subscriptions.json).
 # ------------------------------------------------------------
 SUBS_ENTRY_NAME = "subscriptions.json"
+REFERRALS_ENTRY_NAME = "referrals.json"
 SUBSCRIBE_CONTACT = os.getenv("SUBSCRIBE_CONTACT", "")   # e.g. "@yourusername" — shown to people who hit a limit
 
 # Subscribe buttons stay switched off until this is set to "1" (env SUBSCRIPTIONS_ENABLED).
@@ -1950,12 +1972,21 @@ TIERS: dict[str, dict] = {
 
 subscriptions: dict[str, dict] = {}   # user id (text) -> {"tier": "plus", "until": unix time}
 
+# Invite rewards (/invite). Saved inside Database.zip (referrals.json).
+referrals: dict = {
+    "pending": {},    # new person (text id) -> who invited them; opened the bot via the link, not counted yet
+    "progress": {},   # inviter (text id) -> [people counted since their last reward]
+    "counted": {},    # everyone ever counted (text id) -> inviter, so nobody counts twice
+    "rewards": {},    # inviter (text id) -> how many times they earned the reward
+    "bonus": {},      # user (text id) -> {"tier": ..., "until": ...} free days; runs next to a paid plan
+}
+
 
 def tier_label(tier: str) -> str:
     return f"{TIERS[tier]['emoji']} {TIERS[tier]['label']}"
 
 
-def active_subscription(user_id: int | None) -> dict | None:
+def _paid_subscription(user_id: int | None) -> dict | None:
     if user_id is None:
         return None
 
@@ -1969,6 +2000,39 @@ def active_subscription(user_id: int | None) -> dict | None:
         return None
 
     return entry
+
+
+def _active_bonus(user_id: int | None) -> dict | None:
+    """Free days earned with /invite."""
+    if user_id is None:
+        return None
+
+    entry = referrals["bonus"].get(str(user_id))
+
+    if entry is None:
+        return None
+
+    if float(entry.get("until", 0)) <= time.time() or entry.get("tier") not in TIERS:
+        referrals["bonus"].pop(str(user_id), None)
+        return None
+
+    return entry
+
+
+def active_subscription(user_id: int | None) -> dict | None:
+    paid = _paid_subscription(user_id)
+    bonus = _active_bonus(user_id)
+
+    if paid is None:
+        return bonus
+
+    if bonus is None:
+        return paid
+
+    def rank(entry: dict) -> tuple:
+        return (TIERS[entry["tier"]]["priority"], float(entry["until"]))
+
+    return bonus if rank(bonus) > rank(paid) else paid
 
 
 def get_tier(user_id: int | None) -> str:
@@ -2126,7 +2190,7 @@ def display_name_for(user_id: int) -> str:
 
 def grant_plan(user_id: int, tier: str, days: int) -> tuple[float, str]:
     """Give (or extend) a plan. Returns (expiry time, wording)."""
-    current = active_subscription(user_id)
+    current = _paid_subscription(user_id)
 
     if current is not None and current["tier"] == tier:
         until = float(current["until"]) + days * 86400      # same plan: add the days on top
@@ -2152,6 +2216,244 @@ async def notify_user_granted(bot, user_id: int, tier: str, until: float) -> boo
         return True
     except Exception:
         return False
+
+
+# ------------------------------------------------------------
+# /invite — every user gets a personal link. When INVITE_TARGET brand-new
+# people open the bot through it AND are in the channel, the inviter gets
+# INVITER_DAYS days of Pro and those people get INVITEE_DAYS day of Plus.
+# It repeats: every group of 3 earns the reward again.
+# ------------------------------------------------------------
+INVITE_TARGET = 3
+INVITER_TIER, INVITER_DAYS = "pro", 3
+INVITEE_TIER, INVITEE_DAYS = "plus", 1
+MAX_PENDING_INVITES = 5000
+INVITE_MAX_REWARDS = 2   # each person can earn the reward at most this many times
+
+MSG_INVITE_PAGE = (
+    "🎁 Invite friends, get free Pro!\n\n"
+    "Your personal link:\n{link}\n\n"
+    "When {target} new people open the bot through it and join our channel:\n"
+    "• you get {inviter_days} of {inviter_tier}\n"
+    "• each of them gets {invitee_days} of {invitee_tier}\n\n"
+    "📊 Progress: {progress}/{target}\n"
+    "🏆 Rewards earned: {rewards}/{max_rewards}"
+)
+MSG_INVITE_LIMIT_REACHED = (
+    "🏆 You've earned the invite reward {max_rewards}/{max_rewards} times — that's the maximum.\n"
+    "Thanks for spreading the word! 💙"
+)
+MSG_INVITE_JOINED = "🎉 {name} joined through your link! Progress: {progress}/{target}"
+MSG_INVITE_DONE_INVITER = (
+    "🎁 {target}/{target} reached! You got {inviter_days} of {inviter_tier}.\n"
+    "Your {target} friends got {invitee_days} of {invitee_tier}.\n\n"
+    "You can earn this reward up to {max_rewards} times in total — rewards used: {rewards}/{max_rewards}."
+)
+MSG_INVITE_DONE_INVITEE = "🎁 {name}'s invite just reached {target}/{target} — you got {invitee_days} of {invitee_tier}!"
+BTN_SHARE_INVITE = "📤 Share my link"
+MSG_SHARE_INVITE_TEXT = "Free video & audio compressor on Telegram 👇"
+
+
+def _days_text(days: int) -> str:
+    return f"{days} day" + ("" if days == 1 else "s")
+
+
+def referrals_json_bytes() -> bytes:
+    return json.dumps(referrals, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def merge_referrals_bytes(raw: bytes) -> None:
+    """Load invites from a Database.zip (adds what's missing; never removes anything)."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"referrals are not valid JSON ({error})") from error
+
+    if not isinstance(data, dict):
+        raise ValueError("not a referrals file")
+
+    for key, inviter in (data.get("counted") or {}).items():
+        referrals["counted"].setdefault(str(key), inviter)
+
+    for key, inviter in (data.get("pending") or {}).items():
+        if str(key) not in referrals["counted"]:
+            referrals["pending"].setdefault(str(key), inviter)
+
+    for inviter, people in (data.get("progress") or {}).items():
+        mine = referrals["progress"].setdefault(str(inviter), [])
+        for person in people if isinstance(people, list) else []:
+            if person not in mine:
+                mine.append(person)
+
+    for inviter, amount in (data.get("rewards") or {}).items():
+        try:
+            referrals["rewards"][str(inviter)] = max(int(amount), int(referrals["rewards"].get(str(inviter), 0)))
+        except (TypeError, ValueError):
+            continue
+
+    for key, entry in (data.get("bonus") or {}).items():
+        try:
+            until = float(entry["until"])
+            tier = entry["tier"]
+        except (TypeError, KeyError, ValueError):
+            continue
+
+        if tier not in TIERS or until <= time.time():
+            continue
+
+        current = referrals["bonus"].get(str(key))
+        if current is None or until > float(current.get("until", 0)):
+            referrals["bonus"][str(key)] = {"tier": tier, "until": until}
+
+    while len(referrals["pending"]) > MAX_PENDING_INVITES:
+        referrals["pending"].pop(next(iter(referrals["pending"])))
+
+
+def grant_bonus(user_id: int, tier: str, days: int) -> float:
+    """Free days that never downgrade or shorten anything. Returns the new expiry."""
+    paid = _paid_subscription(user_id)
+
+    # They already pay for this tier or a better one: just add the days to their paid plan.
+    if paid is not None and TIERS[paid["tier"]]["priority"] >= TIERS[tier]["priority"]:
+        until, _ = grant_plan(user_id, paid["tier"], days)
+        return until
+
+    current = _active_bonus(user_id)
+
+    if current is not None and TIERS[current["tier"]]["priority"] >= TIERS[tier]["priority"]:
+        current["until"] = float(current["until"]) + days * 86400
+        return float(current["until"])
+
+    until = time.time() + days * 86400
+    referrals["bonus"][str(user_id)] = {"tier": tier, "until": until}
+    return until
+
+
+def invite_limit_reached(user_id: int) -> bool:
+    return int(referrals["rewards"].get(str(user_id), 0)) >= INVITE_MAX_REWARDS
+
+
+def invite_link(bot, user_id: int) -> str:
+    return f"https://t.me/{bot.username}?start=ref_{user_id}"
+
+
+def _parse_ref_start(text: str | None) -> int | None:
+    parts = (text or "").split()
+
+    if len(parts) < 2 or not parts[0].lower().startswith("/start"):
+        return None
+
+    payload = parts[1]
+    return int(payload[4:]) if payload.startswith("ref_") and payload[4:].isdigit() else None
+
+
+async def capture_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs before the channel gate: remembers who invited a brand-new person."""
+    try:
+        message = update.message
+        user = update.effective_user
+
+        if message is None or user is None or user.is_bot:
+            return
+
+        inviter_id = _parse_ref_start(message.text)
+
+        if inviter_id is None or inviter_id == user.id:
+            return
+
+        uid = str(user.id)
+
+        # Only people who have never used the bot count as "new".
+        if uid in stats["users"] or uid in referrals["counted"] or uid in referrals["pending"] or is_unlimited(user.id):
+            return
+
+        if str(inviter_id) not in stats["users"] or invite_limit_reached(inviter_id):
+            return
+
+        referrals["pending"][uid] = inviter_id
+
+        while len(referrals["pending"]) > MAX_PENDING_INVITES:
+            referrals["pending"].pop(next(iter(referrals["pending"])))
+
+        if REQUIRED_CHANNEL_ID == 0:   # no channel to join: count straight away
+            await credit_referral(context.bot, user)
+    except Exception:
+        logger.exception("Couldn't record an invite")
+
+
+async def credit_referral(bot, user) -> None:
+    """The invited person is now in the channel: count them, and reward when the group is complete."""
+    uid = str(user.id)
+    inviter_id = referrals["pending"].pop(uid, None)
+
+    if inviter_id is None or uid in referrals["counted"] or invite_limit_reached(inviter_id):
+        return
+
+    referrals["counted"][uid] = inviter_id
+    group = referrals["progress"].setdefault(str(inviter_id), [])
+    group.append(user.id)
+
+    if len(group) < INVITE_TARGET:
+        with contextlib.suppress(Exception):
+            await bot.send_message(
+                chat_id=inviter_id,
+                text=MSG_INVITE_JOINED.format(name=user_display_name(user), progress=len(group), target=INVITE_TARGET),
+            )
+        return
+
+    batch = group[:INVITE_TARGET]
+    referrals["progress"][str(inviter_id)] = group[INVITE_TARGET:]
+    referrals["rewards"][str(inviter_id)] = int(referrals["rewards"].get(str(inviter_id), 0)) + 1
+
+    grant_bonus(inviter_id, INVITER_TIER, INVITER_DAYS)
+    fmt = dict(
+        target=INVITE_TARGET,
+        inviter_days=_days_text(INVITER_DAYS), inviter_tier=tier_label(INVITER_TIER),
+        invitee_days=_days_text(INVITEE_DAYS), invitee_tier=tier_label(INVITEE_TIER),
+        max_rewards=INVITE_MAX_REWARDS, rewards=referrals["rewards"][str(inviter_id)],
+    )
+
+    with contextlib.suppress(Exception):
+        await bot.send_message(chat_id=inviter_id, text=MSG_INVITE_DONE_INVITER.format(**fmt))
+
+    for person_id in batch:
+        grant_bonus(person_id, INVITEE_TIER, INVITEE_DAYS)
+        with contextlib.suppress(Exception):
+            await bot.send_message(
+                chat_id=person_id,
+                text=MSG_INVITE_DONE_INVITEE.format(name=display_name_for(inviter_id), **fmt),
+            )
+
+
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/invite — your personal link and how far along you are."""
+    message = update.effective_message
+    user = update.effective_user
+
+    if message is None or user is None:
+        return
+
+    if invite_limit_reached(user.id):
+        await message.reply_text(MSG_INVITE_LIMIT_REACHED.format(max_rewards=INVITE_MAX_REWARDS))
+        return
+
+    link = invite_link(context.bot, user.id)
+    text = MSG_INVITE_PAGE.format(
+        link=link,
+        target=INVITE_TARGET,
+        inviter_days=_days_text(INVITER_DAYS), inviter_tier=tier_label(INVITER_TIER),
+        invitee_days=_days_text(INVITEE_DAYS), invitee_tier=tier_label(INVITEE_TIER),
+        progress=len(referrals["progress"].get(str(user.id), [])),
+        rewards=int(referrals["rewards"].get(str(user.id), 0)),
+        max_rewards=INVITE_MAX_REWARDS,
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            BTN_SHARE_INVITE,
+            url=f"https://t.me/share/url?url={quote(link, safe='')}&text={quote(MSG_SHARE_INVITE_TEXT)}",
+        )
+    ]])
+    await message.reply_text(text, reply_markup=keyboard)
 
 
 # ---- /subscribe: pick a plan, pay, send a screenshot -> the admin approves with one tap
@@ -2415,6 +2717,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     subscriptions.pop(str(user_id), None)
+    referrals["bonus"].pop(str(user_id), None)
     await message.reply_text(MSG_PLAN_ENDED_FOR_BACK_TO.format(name=display_name_for(user_id), user_id=user_id))
 
 
@@ -2547,6 +2850,9 @@ async def require_channel_membership(update: Update, context: ContextTypes.DEFAU
     is_recheck = query is not None and query.data == "joincheck"
 
     if joined:
+        if str(user.id) in referrals["pending"]:
+            await credit_referral(context.bot, user)
+
         if is_recheck:
             await query.answer(MSG_THANKS_FOR_JOINING)
             with contextlib.suppress(Exception):
@@ -2730,7 +3036,7 @@ def record_job(
 
     label = level_label or {
         "audio": "Audio only", "audio_edit": "Audio edit", "audio_replace": "Audio replace",
-        "cover_only": "Cover only",
+        "cover_only": "Cover only", "audio_copy": "Audio tags (no compression)",
     }.get(kind, "Video")
     level_entry = stats["levels"].setdefault(
         label, {"jobs": 0, "original_bytes": 0, "compressed_bytes": 0, "encode_seconds": 0.0, "media_seconds": 0.0}
@@ -3159,6 +3465,13 @@ AUDIO_REPLACE_LEVEL = "audio_replace"
 # button shown after a video cover is set.
 COVER_ONLY_LEVEL = "cover_only"
 
+# Sentinel for an AUDIO file the user wants back with new tags (name /
+# artist / album / cover) but WITHOUT any re-encoding: the sound is
+# stream-copied, so quality and size stay exactly as they were. Only ever
+# passed to run_compression from the "Send as is" button (callback
+# "audiosend") — it never appears in audioset/volumeset callback data.
+AUDIO_COPY_LEVEL = "audio_copy"
+
 # Audio quality used for a replacement recording. The video is copied
 # (not re-encoded), so the extra bitrate over "medium" costs very
 # little size but keeps the user's recording sounding as good as sent.
@@ -3264,7 +3577,7 @@ open_pdf_sessions: dict[int, int] = {}
 # treated as the replacement track instead of a new audio file to compress.
 awaiting_audio_replacement: dict[int, int] = {}
 
-# chat_id -> {"mid": pending message_id, "field": "name" | "album" | "cover" | "videocover"}
+# chat_id -> {"mid": pending message_id, "field": "name" | "artist" | "album" | "cover" | "videocover"}
 # While an entry exists, the next text message (name / album) or image
 # (cover / videocover) that chat sends is treated as that value.
 awaiting_input: dict[int, dict] = {}
@@ -3907,6 +4220,12 @@ def audio_keyboard(
     if level == AUDIO_ONLY_LEVEL:
         rows.append([
             InlineKeyboardButton(
+                BTN_SEND_AS_IS,
+                callback_data=f"audiosend:_:{message_id}",
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
                 BTN_RENAME_ALBUM_NAME_COVER,
                 callback_data=f"ameta:open:{message_id}",
             )
@@ -4049,16 +4368,18 @@ def sanitize_filename(name: str | None, max_length: int = 100) -> str | None:
 def audio_meta_text(pending: dict) -> str:
     original = Path(pending.get("filename") or "audio").stem
     return (
-        MSG_AUDIO_DETAILS_ALL_OPTIONAL_NAME.format(out_name=pending.get('out_name') or original + ' (original)', album=pending.get('album') or '—', cover_path_choice='✅ set' if pending.get('cover_path') else '—')
+        MSG_AUDIO_DETAILS_ALL_OPTIONAL_NAME.format(out_name=pending.get('out_name') or original + ' (original)', artist=pending.get('artist') or '—', album=pending.get('album') or '—', cover_path_choice='✅ set' if pending.get('cover_path') else '—')
     )
 
 
 def audio_meta_keyboard(message_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(BTN_RENAME_FILE, callback_data=f"ameta:name:{message_id}")],
+        [InlineKeyboardButton(BTN_ARTIST_NAME, callback_data=f"ameta:artist:{message_id}")],
         [InlineKeyboardButton(BTN_ALBUM_NAME, callback_data=f"ameta:album:{message_id}")],
         [InlineKeyboardButton(BTN_ALBUM_COVER, callback_data=f"ameta:cover:{message_id}")],
         [InlineKeyboardButton(BTN_CLEAR_ALL, callback_data=f"ameta:clear:{message_id}")],
+        [InlineKeyboardButton(BTN_SEND_AS_IS, callback_data=f"audiosend:_:{message_id}")],
         [InlineKeyboardButton(BTN_DONE, callback_data=f"ameta:done:{message_id}")],
     ])
 
@@ -4552,6 +4873,7 @@ async def compress_audio_only(
     title: str | None = None,
     album: str | None = None,
     cover_path: str | None = None,
+    artist: str | None = None,
 ) -> None:
     """
     Re-encode an audio-only file at the given bitrate (and optional
@@ -4592,6 +4914,8 @@ async def compress_audio_only(
 
         if title:
             command += ["-metadata", f"title={title}"]
+        if artist:
+            command += ["-metadata", f"artist={artist}"]
         if album:
             command += ["-metadata", f"album={album}"]
 
@@ -4611,6 +4935,133 @@ async def compress_audio_only(
     logger.info("Running FFmpeg (audio-only): %s", " ".join(command))
 
     await run_ffmpeg_with_progress(command, total_duration, progress_callback)
+
+
+
+# Containers where a plain stream copy + tags works, mapped to the file
+# extension they should be saved with. Telegram plays only MP3 / M4A as music.
+AUDIO_COPY_EXTENSIONS = {
+    "mp3": ".mp3", "flac": ".flac", "wav": ".wav", "asf": ".wma",
+    "aac": ".m4a",   # raw AAC (ADTS) can't hold tags: it is re-wrapped into M4A, still no re-encode
+}
+AUDIO_PLAYABLE_EXTENSIONS = (".mp3", ".m4a")
+
+
+async def detect_audio_extension(input_path: str, filename: str | None) -> str:
+    """Pick the output extension from the REAL container (voice notes are named .m4a but are Ogg)."""
+    command = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=format_name:stream=codec_name",
+        "-select_streams", "a:0",
+        "-of", "json", input_path,
+    ]
+    returncode, stdout, _ = await run_command(command)
+
+    if returncode == 0:
+        try:
+            data = json.loads(stdout.decode(errors="replace") or "{}")
+            format_names = (data.get("format", {}).get("format_name") or "").lower().split(",")
+            codec = ((data.get("streams") or [{}])[0].get("codec_name") or "").lower()
+
+            for name, extension in AUDIO_COPY_EXTENSIONS.items():
+                if name in format_names:
+                    return extension
+            if "mov" in format_names or "mp4" in format_names or "m4a" in format_names:
+                return ".m4a"
+            if "ogg" in format_names:
+                return ".opus" if codec == "opus" else ".ogg"
+            if "matroska" in format_names or "webm" in format_names:
+                return ".mka"
+        except Exception:
+            logger.exception("Couldn't parse the ffprobe output for the audio format")
+
+    suffix = Path(filename or "").suffix.lower()
+    return suffix if suffix in AUDIO_FILE_EXTENSIONS else ".m4a"
+
+
+async def tag_audio_without_compression(
+    input_path: str,
+    output_path: str,
+    total_duration: float | None = None,
+    progress_callback=None,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    cover_path: str | None = None,
+) -> bool:
+    """
+    Copy the audio stream as it is (no re-encode, so no quality loss) and
+    write the new tags into the file. Tags the user didn't change keep the
+    values the file already had; an existing embedded cover is kept unless
+    a new one was set. Returns True if the new cover was embedded in the
+    file (False if there was none, or the format can't hold one — the job
+    is retried without it rather than failing).
+    """
+
+    extension = Path(output_path).suffix.lower()
+
+    def build_command(with_cover: bool) -> list[str]:
+        command = ["ffmpeg", "-y"]
+
+        if progress_callback is not None and total_duration:
+            command += ["-progress", "pipe:1", "-nostats", "-loglevel", "error"]
+
+        command += ["-i", input_path]
+
+        if with_cover:
+            command += [
+                "-i", str(cover_path),
+                "-map", "0:a:0", "-map", "1:v:0",
+                "-c", "copy",
+                "-disposition:v:0", "attached_pic",
+            ]
+            if extension == ".mp3":
+                command += ["-id3v2_version", "3", "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
+        else:
+            # Keep the file's own embedded cover (if any) when no new one was set.
+            command += ["-map", "0:a:0", "-map", "0:v?", "-c", "copy"]
+            if extension == ".mp3":
+                command += ["-id3v2_version", "3"]
+
+        command += ["-map_metadata", "0"]
+
+        if title:
+            command += ["-metadata", f"title={title}"]
+        if artist:
+            command += ["-metadata", f"artist={artist}"]
+        if album:
+            command += ["-metadata", f"album={album}"]
+
+        command.append(output_path)
+        return command
+
+    if cover_path and Path(cover_path).exists():
+        command = build_command(True)
+        logger.info("Running FFmpeg (audio tags, no re-encode, with cover): %s", " ".join(command))
+        try:
+            await run_ffmpeg_with_progress(command, total_duration, progress_callback)
+            return True
+        except RuntimeError:
+            logger.warning("Embedding the cover failed — retrying without it.")
+
+    command = build_command(False)
+    logger.info("Running FFmpeg (audio tags, no re-encode): %s", " ".join(command))
+    try:
+        await run_ffmpeg_with_progress(command, total_duration, progress_callback)
+    except RuntimeError:
+        # Last resort: audio stream only (some containers reject the extra stream).
+        fallback = ["ffmpeg", "-y", "-i", input_path, "-map", "0:a:0", "-c", "copy", "-map_metadata", "0"]
+        if title:
+            fallback += ["-metadata", f"title={title}"]
+        if artist:
+            fallback += ["-metadata", f"artist={artist}"]
+        if album:
+            fallback += ["-metadata", f"album={album}"]
+        fallback.append(output_path)
+        logger.info("Running FFmpeg (audio tags, audio stream only): %s", " ".join(fallback))
+        await run_ffmpeg_with_progress(fallback, total_duration, progress_callback)
+
+    return False
 
 
 async def edit_video_audio(
@@ -5886,16 +6337,19 @@ async def run_compression(
     extras = pending_compressions.get(source_message_id) or {}
     custom_name = sanitize_filename(extras.get("out_name"))
     custom_album = extras.get("album")
+    custom_artist = extras.get("artist")
     cover_path = extras.get("cover_path")
     cover_thumb_path = extras.get("cover_thumb_path")
+    cover_embedded = False
 
+    is_audio_copy = level == AUDIO_COPY_LEVEL
     is_audio_only = level is None
     is_video_audio_edit = level == AUDIO_EDIT_LEVEL
     is_video_audio_replace = level == AUDIO_REPLACE_LEVEL
     is_cover_only = level == COVER_ONLY_LEVEL
     level_info = (
         None
-        if (is_audio_only or is_video_audio_edit or is_video_audio_replace or is_cover_only)
+        if (is_audio_only or is_audio_copy or is_video_audio_edit or is_video_audio_replace or is_cover_only)
         else LEVELS[level]
     )
     copy_audio = False
@@ -5922,6 +6376,9 @@ async def run_compression(
 
     audio_info = AUDIO_LEVELS[audio_level]
     audio_bitrate = audio_info["bitrate"]
+    if is_audio_copy:
+        audio_info = AUDIO_LEVELS[ORIGINAL_AUDIO]   # the sound is copied, not re-encoded
+        audio_bitrate = None
     # Local-mode uploads use the file's own name on disk, so a rename
     # has to be the real output file name.
     output_path = work_dir / (
@@ -5930,6 +6387,12 @@ async def run_compression(
     if is_cover_only:
         # Nothing is encoded: the original file itself is what gets uploaded.
         output_path = Path(input_path)
+    if is_audio_copy:
+        # Keep the real container (and so the real extension); the file keeps
+        # its original name unless the user renamed it.
+        copy_extension = await detect_audio_extension(str(input_path), extras.get("filename"))
+        copy_base = custom_name or sanitize_filename(Path(extras.get("filename") or "").stem) or "audio"
+        output_path = work_dir / f"{copy_base}{copy_extension}"
 
     job_token = object()
     queue_refresh_task = None
@@ -5953,6 +6416,7 @@ async def run_compression(
         context.bot,
         stats_user,
         "audio" if is_audio_only
+        else "audio (tags only, no compression)" if is_audio_copy
         else "audio (video edit)" if is_video_audio_edit
         else "audio (replacement)" if is_video_audio_replace
         else "cover (video unchanged)" if is_cover_only
@@ -5974,6 +6438,7 @@ async def run_compression(
                 user=stats_user,
                 kind=(
                     "audio" if is_audio_only
+                    else "audio_copy" if is_audio_copy
                     else "audio_edit" if is_video_audio_edit
                     else "audio_replace" if is_video_audio_replace
                     else "cover_only" if is_cover_only
@@ -6049,6 +6514,8 @@ async def run_compression(
                     compressing_label = (
                         MSG_COMPRESSING_AUDIO.format(audio_info_label=audio_info['label'], boost_suffix=boost_suffix, enhancement_suffix=enhancement_suffix)
                     )
+                elif is_audio_copy:
+                    compressing_label = MSG_SENDING_AUDIO_AS_IS
                 elif is_cover_only:
                     compressing_label = MSG_COVER_ONLY_UPLOADING
                 elif is_video_audio_edit:
@@ -6075,7 +6542,7 @@ async def run_compression(
 
                 await context.bot.send_chat_action(
                     chat_id=chat_id,
-                    action=ChatAction.UPLOAD_VOICE if is_audio_only else ChatAction.UPLOAD_VIDEO,
+                    action=ChatAction.UPLOAD_VOICE if (is_audio_only or is_audio_copy) else ChatAction.UPLOAD_VIDEO,
                 )
 
                 await admin_watch.start()
@@ -6140,6 +6607,18 @@ async def run_compression(
                         title=custom_name,
                         album=custom_album,
                         cover_path=cover_path,
+                        artist=custom_artist,
+                    )
+                elif is_audio_copy:
+                    cover_embedded = await tag_audio_without_compression(
+                        str(input_path),
+                        str(output_path),
+                        total_duration=duration,
+                        progress_callback=on_progress if duration else None,
+                        title=custom_name,
+                        artist=custom_artist,
+                        album=custom_album,
+                        cover_path=cover_path,
                     )
                 elif is_cover_only:
                     pass   # nothing to encode: the original file is uploaded as it is
@@ -6193,6 +6672,51 @@ async def run_compression(
             percentage = (saved / original_size) * 100
         else:
             percentage = 0
+
+        if is_audio_copy:
+            output_duration = await get_duration(str(output_path))
+
+            await status_message.edit_text(MSG_UPLOADING_AUDIO_AS_IS)
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+
+            audio_thumbnail = (
+                str(cover_thumb_path)
+                if cover_thumb_path and Path(cover_thumb_path).exists()
+                else None
+            )
+
+            caption = MSG_AUDIO_SENT_AS_IS + "\n\n"
+            if custom_artist:
+                caption += MSG_ARTIST.format(custom_artist=custom_artist)
+            if custom_album:
+                caption += MSG_ALBUM.format(custom_album=custom_album).rstrip("\n") + "\n"
+            caption += f"Size: {format_size(compressed_size)}"
+
+            if cover_path and not cover_embedded:
+                caption += "\n\n" + MSG_COVER_NOT_EMBEDDED
+
+            if output_path.suffix.lower() in AUDIO_PLAYABLE_EXTENSIONS:
+                await with_retries(
+                    context.bot.send_audio,
+                    chat_id=chat_id,
+                    audio=str(output_path),
+                    duration=round(output_duration) if output_duration else None,
+                    title=custom_name,
+                    performer=custom_artist,
+                    thumbnail=audio_thumbnail,
+                    caption=caption,
+                )
+            else:
+                # Telegram only plays MP3 / M4A as music: other formats go out as a file, still untouched.
+                await with_retries(
+                    context.bot.send_document,
+                    chat_id=chat_id,
+                    document=str(output_path),
+                    thumbnail=audio_thumbnail,
+                    caption=caption + "\n\n" + MSG_SENT_AS_FILE_NOT_MP3_M4A,
+                )
+            log_success()
+            return
 
         if is_audio_only:
             output_duration = await get_duration(str(output_path))
@@ -6299,7 +6823,7 @@ async def run_compression(
                 )
 
     except Exception as error:
-        logger.exception("Error compressing %s:", "audio" if is_audio_only else "video")
+        logger.exception("Error compressing %s:", "audio" if (is_audio_only or is_audio_copy) else "video")
         record_failure(stats_user)
         admin_outcome = ("failed", give_bytes_back())   # no result: give the bytes back
         await context.bot.send_message(
@@ -6634,6 +7158,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             pending.pop("album", None)
         else:
             pending["album"] = text[:200]
+    elif field == "artist":
+        if text == "-":
+            pending.pop("artist", None)
+        else:
+            pending["artist"] = text[:200]
     else:
         await message.reply_text(MSG_I_M_WAITING_FOR_AN)
         return
@@ -7494,10 +8023,11 @@ async def handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_TY
             await show_audio_meta_panel(context, chat_id, message_id)
             return
 
-        if field in ("name", "album", "cover"):
+        if field in ("name", "artist", "album", "cover"):
             awaiting_input[chat_id] = {"mid": message_id, "field": field}
             prompts = {
                 "name": MSG_SEND_THE_NEW_FILE_NAME,
+                "artist": MSG_SEND_THE_ARTIST_NAME_NOW,
                 "album": MSG_SEND_THE_ALBUM_NAME_NOW,
                 "cover": MSG_SEND_THE_ALBUM_COVER_NOW,
             }
@@ -7520,7 +8050,7 @@ async def handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         if field == "clear":
-            for key in ("out_name", "album", "cover_path", "cover_thumb_path"):
+            for key in ("out_name", "artist", "album", "cover_path", "cover_thumb_path"):
                 pending.pop(key, None)
             await show_audio_meta_panel(context, chat_id, message_id)
             return
@@ -7825,6 +8355,33 @@ async def handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    if action == "audiosend":
+        pending = pending_compressions.get(message_id)
+
+        if pending is None or pending.get("media_type") != "audio":
+            await query.message.reply_text(MSG_THAT_FILE_ISN_T_IN)
+            return
+
+        if message_id in active_job_ids:
+            return   # already being processed: ignore a double tap
+
+        if awaiting_input.get(pending["chat_id"], {}).get("mid") == message_id:
+            awaiting_input.pop(pending["chat_id"], None)   # they moved on from a half-finished prompt
+
+        await run_compression(
+            update, context,
+            input_path=pending["input_path"],
+            work_dir=pending["work_dir"],
+            original_size=pending["original_size"],
+            level=AUDIO_COPY_LEVEL,
+            chat_id=pending["chat_id"],
+            source_message_id=message_id,
+            status_message=query.message,
+            duration=pending.get("duration"),
+            audio_level=ORIGINAL_AUDIO,
+        )
+        return
+
     if action == "coveronly":
         pending = pending_compressions.get(message_id)
 
@@ -8015,11 +8572,13 @@ def main() -> None:
     application.add_handler(CommandHandler("reset_stats", reset_stats_command))
     application.add_handler(CommandHandler("update", update_command))
     # Runs before everything else (group -2): people must join the channel first.
+    application.add_handler(TypeHandler(Update, capture_referral), group=-3)
     application.add_handler(TypeHandler(Update, require_channel_membership), group=-2)
     # Then (group -1) keep the user list current.
     application.add_handler(TypeHandler(Update, track_user), group=-1)
     application.add_handler(CommandHandler("limit", limit_command))
     application.add_handler(CommandHandler("plans", plans_command))
+    application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("grant", grant_command))
     application.add_handler(CommandHandler("revoke", revoke_command))
