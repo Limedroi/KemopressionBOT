@@ -2251,7 +2251,7 @@ MSG_INVITE_DONE_INVITER = (
 )
 MSG_INVITE_DONE_INVITEE = "🎁 {name}'s invite just reached {target}/{target} — you got {invitee_days} of {invitee_tier}!"
 BTN_SHARE_INVITE = "📤 Share my link"
-MSG_SHARE_INVITE_TEXT = "Free video & audio compressor on Telegram 👇"
+MSG_SHARE_INVITE_TEXT = "Free video & audio compressor on Telegram (مش هكر والله 😁❤️)"
 
 
 def _days_text(days: int) -> str:
